@@ -12,6 +12,8 @@ O tutorial nasceu de um caso real. A primeira suspeita era a letra da unidade, m
 | Log com `spawn npx ENOENT` | Falta do Node.js, ou `npx` chamado direto no config | Instale o Node.js e use [`cmd /c npx`](#6-configure-o-servidor) |
 | Servidor conecta, mas responde `Access denied - path outside allowed directories` | Sessão do Code/Cowork substituiu as pastas permitidas | [Use `--confine-roots`](#sessões-do-code-e-do-cowork) |
 | `Cannot access directory O:\", skipping` | Aspas depois da barra no teste manual | [Veja as armadilhas](#armadilhas) |
+| A edição do config sumiu depois de reiniciar | O app regravou o arquivo com a cópia que tinha em memória | [Edite com o app fechado](#6-configure-o-servidor) |
+| Com dois vaults, só um aparece | Um vault foi trocado em vez de somado, ou a sessão está dentro de um deles | [Vários vaults](#vários-vaults) |
 
 ## Requisitos
 
@@ -108,9 +110,20 @@ node scripts\testar-mcp.js "\\SERVIDOR\Obsidian"
 
 Se funcionar, ele mostra `initialize OK` e o conteúdo do vault na linha `list_directory`.
 
+O script inicia um único servidor com todos os caminhos passados, como a lista `args` do config, e aceita as mesmas opções `--confine-roots` e `--read-only`. Com `--root <pasta>`, ele imita uma sessão do Code ou do Cowork que informa essa pasta como Root, o que permite conferir o efeito do `--confine-roots` sem abrir o app:
+
+```powershell
+node scripts\testar-mcp.js --confine-roots --root "C:\pasta-da-sessao" "\\SERVIDOR\Obsidian"
+```
+
+A linha `allowed` mostra as pastas que valeram depois das Roots.
+
 ### 6. Configure o servidor
 
-Feche o Claude desktop pela bandeja antes de editar, porque o app reescreve esse arquivo enquanto está aberto.
+Feche o Claude desktop pela bandeja antes de editar, porque o app reescreve esse arquivo enquanto está aberto. Ele grava a cópia que tem em memória, então uma edição feita com o app aberto some sem aviso, mesmo que o JSON estivesse certo. Mais dois cuidados:
+
+- **Edite de um shell aberto fora do Claude.** Um PowerShell ou script iniciado por uma sessão do próprio app é encerrado junto com ele ao fechar pela bandeja.
+- **Só reabra o app depois de salvar.** Se ele abrir antes da gravação, carrega o config antigo e volta a sobrescrever o arquivo.
 
 Dentro de `mcpServers`, adicione o bloco `obsidian` e não mexa no resto do arquivo. Há um exemplo em [`exemplos/claude_desktop_config.exemplo.json`](exemplos/claude_desktop_config.exemplo.json):
 
@@ -150,6 +163,43 @@ Get-Content $cfg -Raw -Encoding UTF8 | ConvertFrom-Json | Select-Object -ExpandP
 2. Veja se o servidor `obsidian` deixou de aparecer como `failed`.
 3. Em uma conversa nova, peça para listar o conteúdo do vault.
 
+## Vários vaults
+
+Coloque todos os caminhos nos `args` do **mesmo** servidor, um item por caminho:
+
+```json
+"args": [
+  "/c",
+  "npx",
+  "-y",
+  "@modelcontextprotocol/server-filesystem",
+  "--confine-roots",
+  "D:\\Notas\\Pessoal",
+  "\\\\SERVIDOR\\Obsidian\\Equipe"
+]
+```
+
+Não crie um segundo bloco com o mesmo nome `obsidian`: chaves repetidas no JSON não convivem, e só um dos blocos vale. Se quiser dois servidores separados, dê nomes diferentes a eles.
+
+Teste os caminhos juntos, como o app vai usá-los:
+
+```powershell
+node scripts\testar-mcp.js --confine-roots "D:\Notas\Pessoal" "\\SERVIDOR\Obsidian\Equipe"
+```
+
+Com `--confine-roots`, uma sessão aberta **dentro** de um dos vaults fica restrita à própria pasta e perde o acesso ao outro vault (testado). Veja a tabela da próxima seção.
+
+## Claude Code
+
+O Claude Code tem a própria lista de servidores e não lê o `claude_desktop_config.json`. Para registrar o mesmo servidor para todos os projetos do seu usuário:
+
+```powershell
+claude mcp add --scope user obsidian -- cmd /c npx -y @modelcontextprotocol/server-filesystem --confine-roots "\\SERVIDOR\Obsidian"
+claude mcp get obsidian
+```
+
+O `cmd /c` é necessário pelo mesmo motivo do config do app. Tudo depois do `--` vai para o servidor, então os vaults extras entram no fim do comando. Para trocar os caminhos, rode `claude mcp remove obsidian -s user` e registre de novo. Reinicie as sessões abertas para que elas carreguem a mudança.
+
 ## Sessões do Code e do Cowork
 
 **Sem `--confine-roots`, conectar não garante acesso ao vault.** O servidor tem duas fontes de pastas permitidas, os argumentos do config e as *Roots* informadas pelo cliente MCP. O app informa a pasta da sessão como Root, e por padrão as Roots válidas **substituem** os argumentos:
@@ -168,16 +218,17 @@ Ignored client roots outside the command-line directories (--confine-roots): C:\
 | Onde o servidor é usado | Sem a opção | Com `--confine-roots` |
 |---|---|---|
 | Sessão do Code com pasta fora do vault | Só a pasta da sessão; o vault dá `Access denied` (testado) | O vault inteiro (testado) |
-| Sessão aberta dentro do vault | Só a pasta da sessão (pelo código) | Só a pasta da sessão (pelo código) |
+| Sessão aberta dentro do vault | Só a pasta da sessão (pelo código) | Só a pasta da sessão (testado) |
+| Dois vaults, sessão dentro de um deles | Só a pasta da sessão (pelo código) | Só a pasta da sessão; o outro vault dá `Access denied` (testado) |
 | Conexão principal do app | O vault inteiro (pelo log) | Não testado |
 
-O `--confine-roots` foi testado no `server-filesystem` 2.2.0. Depois de adicioná-lo, reinicie o app. Para conferir, chame `list_allowed_directories` numa sessão: a resposta deve ser o caminho do vault.
+Os casos marcados como testados podem ser repetidos com `scripts/testar-mcp.js --root`. O `--confine-roots` foi testado no `server-filesystem` 2.2.0. Depois de adicioná-lo, reinicie o app. Para conferir, chame `list_allowed_directories` numa sessão: a resposta deve ser o caminho do vault.
 
 **Efeito colateral:** toda sessão do Code ou do Cowork neste computador passa a poder ler e gravar no vault inteiro, seja qual for a pasta aberta. Se o vault for compartilhado, isso alcança as notas de outras pessoas. Sem a opção, o vault fica fora do alcance dessas sessões, e pode ser a escolha certa se você não precisa dele nelas.
 
 ## Armadilhas
 
-- **A letra da unidade não era o problema neste caso.** Depois de instalar o Node.js, `O:\` e o caminho UNC funcionaram no teste do passo 5, iniciado de um shell aberto pelo próprio app. Mesmo assim, prefira o UNC: unidades mapeadas valem por sessão de usuário, e um processo em outro contexto (como administrador ou outro usuário) pode não enxergar a letra.
+- **A letra da unidade não era o problema neste caso.** Depois de instalar o Node.js, `O:\` e o caminho UNC funcionaram no teste do passo 5, iniciado de um shell aberto pelo próprio app. Mesmo assim, prefira o UNC: unidades mapeadas valem por sessão de usuário, e um processo em outro contexto (como administrador ou outro usuário) pode não enxergar a letra. Com a letra no config, o `list_allowed_directories` também lista o caminho UNC correspondente, e o mesmo vault aparece por dois caminhos.
 - **Aspas com barra final.** `"O:\"` não funciona na linha de comando, porque `\"` vira uma aspa literal e o servidor recebe `O:\"`. Use `O:\` sem aspas ou o caminho UNC.
 - **Teste em PowerShell.** Um teste do protocolo feito à mão em PowerShell expirou sem resposta no caso real, enquanto o mesmo servidor respondeu ao script em Node. A causa não foi investigada, então prefira o script deste repositório.
 - **`Connection closed` é genérico.** Outros servidores podem mostrar o mesmo erro por outros motivos. Um servidor acessado por `mcp-proxy` em uma porta local, por exemplo, falha com `httpx.ConnectError: All connection attempts failed` se o programa que abre a porta estiver fechado. O remédio é sempre começar pelo `mcp-server-<nome>.log`.
@@ -200,7 +251,7 @@ Copy-Item "$cfg.bak" $cfg -Force
 
 ## Ambiente testado
 
-Em 5 de novembro de 2026:
+Em 5 de novembro de 2026, com os testes de vários vaults e de Roots simuladas repetidos em 9 de novembro:
 
 | Item | Versão |
 |---|---|
